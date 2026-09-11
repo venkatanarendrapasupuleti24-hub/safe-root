@@ -532,6 +532,7 @@ function LiveSafetyPanel({ liveSafety, loading, error }) {
 
   return (
     <section
+      className="live-safety-panel"
       style={{
         margin: "14px 0",
         borderRadius: "16px",
@@ -597,6 +598,7 @@ function LiveSafetyPanel({ liveSafety, loading, error }) {
           </div>
 
           <div
+            className="live-safety-metrics"
             style={{
               marginTop: "12px",
               display: "grid",
@@ -627,6 +629,7 @@ function LiveSafetyPanel({ liveSafety, loading, error }) {
           </div>
 
           <div
+            className="live-safety-weather-row"
             style={{
               marginTop: "10px",
               display: "grid",
@@ -732,6 +735,7 @@ function NavigationPanel({
 
   return (
     <section
+      className="navigation-panel"
       style={{
         margin: "18px 0",
         padding: "18px",
@@ -784,7 +788,7 @@ function NavigationPanel({
           )}
         </div>
 
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+        <div className="navigation-action-buttons" style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
           {!navigationActive ? (
             <>
               <button
@@ -856,6 +860,7 @@ function NavigationPanel({
 
 
       <div
+        className="navigation-share-buttons"
         style={{
           marginTop: "12px",
           display: "flex",
@@ -997,6 +1002,7 @@ function NavigationPanel({
       )}
 
       <div
+        className="navigation-summary-grid"
         style={{
           marginTop: "16px",
           display: "grid",
@@ -1067,6 +1073,7 @@ function NavigationPanel({
         </div>
 
         <div
+          className="navigation-stat-grid"
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
@@ -1110,6 +1117,7 @@ function NavigationPanel({
       </div>
       {currentPosition && navigationActive && (
         <div
+          className="navigation-meta-row"
           style={{
             marginTop: "10px",
             display: "flex",
@@ -1384,6 +1392,7 @@ function LiveLocationViewer({ shareId }) {
 
   return (
     <div
+      className="live-viewer-page"
       style={{
         minHeight: "100vh",
         background: "#eef6ff",
@@ -1391,6 +1400,7 @@ function LiveLocationViewer({ shareId }) {
       }}
     >
       <div
+        className="live-viewer-card"
         style={{
           maxWidth: "1100px",
           margin: "0 auto",
@@ -1401,6 +1411,7 @@ function LiveLocationViewer({ shareId }) {
         }}
       >
         <div
+          className="live-viewer-header"
           style={{
             padding: "20px 24px",
             background: "linear-gradient(135deg, #0f172a, #1e3a8a)",
@@ -1433,12 +1444,13 @@ function LiveLocationViewer({ shareId }) {
           </div>
         )}
 
-        <div style={{ padding: "16px" }}>
+        <div className="live-viewer-content" style={{ padding: "16px" }}>
           {position ? (
             <>
               <MapContainer
                 center={position}
                 zoom={16}
+                className="live-location-map"
                 style={{
                   height: "620px",
                   width: "100%",
@@ -2796,6 +2808,7 @@ function SafeRouteMain() {
         <MapContainer
           center={mapCenter}
           zoom={mapZoom}
+          className="main-map"
           style={{
             height: "500px",
             width: "100%"
@@ -3105,6 +3118,7 @@ function SafeRouteMain() {
 
           {selectedRouteId != null && !showAllRoutes && (
             <div
+              className="selected-path-banner"
               style={{
                 margin: "12px 0 18px",
                 padding: "12px 15px",
@@ -3141,7 +3155,7 @@ function SafeRouteMain() {
             </div>
           )}
 
-          <div style={{ margin: "12px 0 18px", padding: "13px 15px", borderRadius: "12px", background: "#eff6ff", border: "1px solid #bfdbfe", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+          <div className="more-routes-banner" style={{ margin: "12px 0 18px", padding: "13px 15px", borderRadius: "12px", background: "#eff6ff", border: "1px solid #bfdbfe", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
             <div>
               <strong>Not satisfied with these routes?</strong>
               <div style={{ fontSize: "0.82rem", color: "#475569", marginTop: "3px" }}>Search for more distinct road paths, up to 10 routes.</div>
@@ -3283,7 +3297,7 @@ function SafeRouteMain() {
 
                       </div>
 
-                      <div style={{ alignSelf: "center" }}>
+                      <div className="route-select-action" style={{ alignSelf: "center" }}>
                         <button
                           onClick={() => selectRouteForNavigation(route.route_id)}
                           style={{

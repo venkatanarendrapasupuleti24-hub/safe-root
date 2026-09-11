@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+requests
+pandas
+numpy
+joblib
+tensorflow
+h5py
+python-dotenv
