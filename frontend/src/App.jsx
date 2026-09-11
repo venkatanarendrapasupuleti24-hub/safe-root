@@ -12,7 +12,8 @@ import {
 
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
-
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 // ============================================================
 // FIX LEAFLET MARKER ICONS
@@ -1356,7 +1357,7 @@ function LiveLocationViewer({ shareId }) {
     const loadLocation = async () => {
       try {
         const response = await fetch(
-          `http://127.0.0.1:8000/share/live/${encodeURIComponent(shareId)}`
+          `${API_BASE_URL}/share/live/${encodeURIComponent(shareId)}`
         );
         const data = await response.json();
 
@@ -1890,7 +1891,7 @@ function SafeRouteMain() {
       setLiveSafetyLoading(true);
 
       try {
-        const response = await fetch("http://127.0.0.1:8000/live-safety", {
+        const response = await fetch(`${API_BASE_URL}/live-safety`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -2063,7 +2064,7 @@ function SafeRouteMain() {
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/share/live/start",
+        `${API_BASE_URL}/share/live/start`,
         {
           method: "POST",
           headers: {
@@ -2126,7 +2127,7 @@ function SafeRouteMain() {
 
     try {
       await fetch(
-        `http://127.0.0.1:8000/share/live/${encodeURIComponent(locationShareId)}/stop`,
+        `${API_BASE_URL}/share/live/${encodeURIComponent(locationShareId)}/stop`,
         {
           method: "POST"
         }
@@ -2153,7 +2154,7 @@ function SafeRouteMain() {
 
       try {
         await fetch(
-          `http://127.0.0.1:8000/share/live/${encodeURIComponent(locationShareId)}`,
+          `${API_BASE_URL}/share/live/${encodeURIComponent(locationShareId)}`,
           {
             method: "POST",
             headers: {
@@ -2234,7 +2235,7 @@ function SafeRouteMain() {
 
       try {
         const response = await fetch(
-          "http://127.0.0.1:8000/reroute",
+          `${API_BASE_URL}/reroute`,
           {
             method: "POST",
             headers: {
@@ -2371,7 +2372,7 @@ function SafeRouteMain() {
     if (locationShareActive && locationShareId) {
       try {
         await fetch(
-          `http://127.0.0.1:8000/share/live/${encodeURIComponent(locationShareId)}/stop`,
+          `${API_BASE_URL}/share/live/${encodeURIComponent(locationShareId)}/stop`,
           { method: "POST" }
         );
       } catch (error) {
@@ -2436,7 +2437,7 @@ function SafeRouteMain() {
     }
     setRatingSubmitting((previous) => ({ ...previous, [routeKey]: true }));
     try {
-      const response = await fetch("http://127.0.0.1:8000/rate-route", {
+      const response = await fetch(`${API_BASE_URL}/rate-route`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ route_key: routeKey, rating, source, destination })
@@ -2463,7 +2464,7 @@ function SafeRouteMain() {
     setMoreRoutesMessage("");
     try {
       const excludedRouteKeys = routes.map((route) => route?.route_key).filter(Boolean);
-      const response = await fetch("http://127.0.0.1:8000/routes", {
+      const response = await fetch(`${API_BASE_URL}/routes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source, destination, max_routes: 10, excluded_route_keys: excludedRouteKeys })
@@ -2545,7 +2546,7 @@ function SafeRouteMain() {
     try {
 
       const response = await fetch(
-        "http://127.0.0.1:8000/routes",
+        `${API_BASE_URL}/routes`,
         {
           method: "POST",
 
