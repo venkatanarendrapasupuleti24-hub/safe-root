@@ -64,7 +64,15 @@ app.add_middleware(
 # URLs
 # ============================================================
 
-GRAPHOPPER_URL = "http://localhost:8989/route"
+GRAPHOPPER_URL = os.getenv(
+    "GRAPHOPPER_URL",
+    "http://localhost:8989/route"
+)
+
+GRAPHHOPPER_API_KEY = os.getenv(
+    "GRAPHHOPPER_API_KEY",
+    ""
+)
 
 GEOCODING_URL = (
     "https://nominatim.openstreetmap.org/search"
@@ -329,6 +337,19 @@ def get_route(points):
             (
                 "point",
                 f"{lat},{lon}"
+            )
+
+        )
+
+
+    # Hosted GraphHopper Directions API requires an API key.
+    # Local GraphHopper does not require one.
+    if "graphhopper.com" in GRAPHOPPER_URL and GRAPHHOPPER_API_KEY:
+        params.append(
+
+            (
+                "key",
+                GRAPHHOPPER_API_KEY
             )
 
         )
