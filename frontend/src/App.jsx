@@ -1348,6 +1348,9 @@ function LiveLocationViewer({ shareId }) {
   const [location, setLocation] = useState(null);
   const [status, setStatus] = useState("Connecting...");
   const [error, setError] = useState("");
+  const [locationName, setLocationName] = useState("Finding current location...");
+  const lastGeocodedPositionRef = useRef(null);
+  const lastGeocodedAtRef = useRef(0);
 
   useEffect(() => {
     if (!shareId) return undefined;
@@ -1390,6 +1393,75 @@ function LiveLocationViewer({ shareId }) {
   const position = location?.latitude != null && location?.longitude != null
     ? [Number(location.latitude), Number(location.longitude)]
     : null;
+
+  // Convert GPS coordinates into a readable place name for the person
+  // viewing the shared live-location link. Coordinates remain internal
+  // for accurate map tracking and are not shown in the UI.
+  useEffect(() => {
+    if (!position) return undefined;
+
+    const [latitude, longitude] = position;
+    const previous = lastGeocodedPositionRef.current;
+    const now = Date.now();
+
+    if (
+      previous &&
+      haversineDistanceMeters(
+        previous[0],
+        previous[1],
+        latitude,
+        longitude
+      ) < 200 &&
+      now - lastGeocodedAtRef.current < 30000
+    ) {
+      return undefined;
+    }
+
+    lastGeocodedPositionRef.current = [latitude, longitude];
+    lastGeocodedAtRef.current = now;
+
+    let cancelled = false;
+
+    const reverseGeocode = async () => {
+      try {
+        const response = await fetch(
+          `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&localityLanguage=en`
+        );
+
+        if (!response.ok) {
+          throw new Error("Reverse geocoding failed.");
+        }
+
+        const data = await response.json();
+
+        const parts = [
+          data.locality,
+          data.city,
+          data.principalSubdivision
+        ].filter(Boolean);
+
+        const readableLocation = parts.length
+          ? [...new Set(parts)].join(", ")
+          : data.countryName || "Current location";
+
+        if (!cancelled) {
+          setLocationName(readableLocation);
+        }
+      } catch (geocodeError) {
+        console.warn("Live location reverse geocoding error:", geocodeError);
+
+        if (!cancelled) {
+          setLocationName("Current location");
+        }
+      }
+    };
+
+    reverseGeocode();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [position]);
 
   return (
     <div
@@ -1488,7 +1560,7 @@ function LiveLocationViewer({ shareId }) {
                 style={{
                   marginTop: "14px",
                   display: "grid",
-                  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                  gridTemplateColumns: "minmax(0, 2fr) minmax(180px, 1fr)",
                   gap: "10px"
                 }}
               >
@@ -1500,22 +1572,11 @@ function LiveLocationViewer({ shareId }) {
                   }}
                 >
                   <div style={{ color: "#64748b", fontSize: "0.8rem" }}>
-                    Latitude
+                    📍 Current location
                   </div>
-                  <strong>{Number(location.latitude).toFixed(6)}</strong>
-                </div>
-
-                <div
-                  style={{
-                    padding: "14px",
-                    borderRadius: "12px",
-                    background: "#f8fafc"
-                  }}
-                >
-                  <div style={{ color: "#64748b", fontSize: "0.8rem" }}>
-                    Longitude
-                  </div>
-                  <strong>{Number(location.longitude).toFixed(6)}</strong>
+                  <strong style={{ fontSize: "1rem" }}>
+                    {locationName}
+                  </strong>
                 </div>
 
                 <div
