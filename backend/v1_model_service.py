@@ -694,87 +694,49 @@ def prepare_v1_features(
 # SCALE V1 BRANCHES
 # ============================================================
 
-def scale_v1_features(
-    features
-):
+def scale_v1_features(features):
 
-    traffic_scaled = (
-
-        traffic_scaler
-        .transform(
-            features["traffic"]
+    traffic_scaled = traffic_scaler.transform(
+        pd.DataFrame(
+            features["traffic"],
+            columns=traffic_scaler.feature_names_in_
         )
-        .astype(
-            np.float32
+    ).astype(np.float32)
+
+    lighting_scaled = lighting_scaler.transform(
+        pd.DataFrame(
+            features["lighting"],
+            columns=lighting_scaler.feature_names_in_
         )
+    ).astype(np.float32)
 
-    )
-
-
-    lighting_scaled = (
-
-        lighting_scaler
-        .transform(
-            features["lighting"]
+    weather_scaled = weather_scaler.transform(
+        pd.DataFrame(
+            features["weather"],
+            columns=weather_scaler.feature_names_in_
         )
-        .astype(
-            np.float32
+    ).astype(np.float32)
+
+    crime_scaled = crime_scaler.transform(
+        pd.DataFrame(
+            features["crime"],
+            columns=crime_scaler.feature_names_in_
         )
+    ).astype(np.float32)
 
-    )
-
-
-    weather_scaled = (
-
-        weather_scaler
-        .transform(
-            features["weather"]
+    emergency_scaled = emergency_scaler.transform(
+        pd.DataFrame(
+            features["emergency"],
+            columns=emergency_scaler.feature_names_in_
         )
-        .astype(
-            np.float32
-        )
-
-    )
-
-
-    crime_scaled = (
-
-        crime_scaler
-        .transform(
-            features["crime"]
-        )
-        .astype(
-            np.float32
-        )
-
-    )
-
-
-    emergency_scaled = (
-
-        emergency_scaler
-        .transform(
-            features["emergency"]
-        )
-        .astype(
-            np.float32
-        )
-
-    )
-
+    ).astype(np.float32)
 
     return {
-
         "traffic": traffic_scaled,
-
         "lighting": lighting_scaled,
-
         "weather": weather_scaled,
-
         "crime": crime_scaled,
-
         "emergency": emergency_scaled
-
     }
 
 

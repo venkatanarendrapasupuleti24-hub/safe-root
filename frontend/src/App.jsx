@@ -1650,6 +1650,10 @@ function SafeRouteMain() {
 
   const [destination, setDestination] = useState("");
 
+  // Exact GPS coordinates used when the user chooses "Use Current Location".
+  const [gpsSourceCoordinates, setGpsSourceCoordinates] = useState(null);
+  const [gpsSourceLoading, setGpsSourceLoading] = useState(false);
+
   const [routes, setRoutes] = useState([]);
 
   const [sourceCoordinates, setSourceCoordinates] =
@@ -2575,6 +2579,55 @@ function SafeRouteMain() {
 
 
   // ==========================================================
+  // USE CURRENT GPS LOCATION AS ROUTE SOURCE
+  // ==========================================================
+
+  const useCurrentLocationAsSource = () => {
+    setError("");
+
+    if (!navigator.geolocation) {
+      setError("Geolocation is not supported by this browser.");
+      return;
+    }
+
+    setGpsSourceLoading(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const latitude = Number(position.coords.latitude);
+        const longitude = Number(position.coords.longitude);
+
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          setError("Could not read valid GPS coordinates.");
+          setGpsSourceLoading(false);
+          return;
+        }
+
+        setGpsSourceCoordinates({ latitude, longitude });
+        setSource("Current location (GPS)");
+        setGpsSourceLoading(false);
+      },
+      (positionError) => {
+        const message =
+          positionError.code === 1
+            ? "Location permission denied. Allow location access and try again."
+            : positionError.code === 2
+              ? "Your current location could not be determined. Try again outdoors."
+              : "GPS request timed out. Please try again.";
+
+        setError(message);
+        setGpsSourceLoading(false);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 15000
+      }
+    );
+  };
+
+
+  // ==========================================================
   // FIND ROUTES
   // ==========================================================
 
@@ -2618,6 +2671,9 @@ function SafeRouteMain() {
           body: JSON.stringify({
             source: source,
             destination: destination,
+            source_coordinates: gpsSourceCoordinates
+              ? [gpsSourceCoordinates.latitude, gpsSourceCoordinates.longitude]
+              : null,
             max_routes: 10,
             excluded_route_keys: []
           })
@@ -2773,11 +2829,41 @@ function SafeRouteMain() {
             type="text"
             placeholder="Enter source location"
             value={source}
-            onChange={(event) =>
-              setSource(event.target.value)
-            }
+            onChange={(event) => {
+              setSource(event.target.value);
+              setGpsSourceCoordinates(null);
+            }}
             onKeyDown={handleKeyDown}
           />
+
+          <button
+            type="button"
+            onClick={useCurrentLocationAsSource}
+            disabled={gpsSourceLoading || loading}
+            style={{
+              marginTop: "8px",
+              border: "1px solid #2563eb",
+              borderRadius: "9px",
+              padding: "9px 12px",
+              background: "#eff6ff",
+              color: "#1d4ed8",
+              fontWeight: 700,
+              cursor: gpsSourceLoading || loading ? "not-allowed" : "pointer",
+              opacity: gpsSourceLoading || loading ? 0.65 : 1
+            }}
+          >
+            {gpsSourceLoading
+              ? "Getting GPS location..."
+              : gpsSourceCoordinates
+                ? "✓ Using Current Location"
+                : "◎ Use Current Location"}
+          </button>
+
+          {gpsSourceCoordinates && (
+            <div style={{ marginTop: "5px", fontSize: "0.78rem", color: "#64748b" }}>
+              GPS accuracy: location captured successfully
+            </div>
+          )}
 
         </div>
 
@@ -2832,33 +2918,37 @@ function SafeRouteMain() {
       )}
 
 
-      <NavigationPanel
-        selectedRoute={selectedRoute}
-        navigationActive={navigationActive}
-        currentPosition={currentPosition}
-        currentInstructionIndex={currentInstructionIndex}
-        onStart={startNavigation}
-        onDemoStart={startDemoNavigation}
-        onStop={stopNavigation}
-        onRecenter={recenterNavigation}
-        gpsError={gpsError}
-        offRoute={offRoute}
-        rerouting={rerouting}
-        rerouteMessage={rerouteMessage}
-        onShareCurrent={shareCurrentLocation}
-        onStartLiveShare={startLiveLocationSharing}
-        onStopLiveShare={stopLiveLocationSharing}
-        locationShareActive={locationShareActive}
-        locationShareUrl={locationShareUrl}
-        locationShareMessage={locationShareMessage}
-        demoNavigationActive={demoNavigationActive}
-      />
+      {navigationActive && (
+        <NavigationPanel
+          selectedRoute={selectedRoute}
+          navigationActive={navigationActive}
+          currentPosition={currentPosition}
+          currentInstructionIndex={currentInstructionIndex}
+          onStart={startNavigation}
+          onDemoStart={startDemoNavigation}
+          onStop={stopNavigation}
+          onRecenter={recenterNavigation}
+          gpsError={gpsError}
+          offRoute={offRoute}
+          rerouting={rerouting}
+          rerouteMessage={rerouteMessage}
+          onShareCurrent={shareCurrentLocation}
+          onStartLiveShare={startLiveLocationSharing}
+          onStopLiveShare={stopLiveLocationSharing}
+          locationShareActive={locationShareActive}
+          locationShareUrl={locationShareUrl}
+          locationShareMessage={locationShareMessage}
+          demoNavigationActive={demoNavigationActive}
+        />
+      )}
 
-      <LiveSafetyPanel
-        liveSafety={liveSafety}
-        loading={liveSafetyLoading}
-        error={liveSafetyError}
-      />
+      {navigationActive && (
+        <LiveSafetyPanel
+          liveSafety={liveSafety}
+          loading={liveSafetyLoading}
+          error={liveSafetyError}
+        />
+      )}
 
 
       {/* ====================================================
@@ -2995,11 +3085,12 @@ function SafeRouteMain() {
             .filter((route) =>
               showAllRoutes || Number(route?.route_id) === Number(selectedRouteId)
             )
-            // Draw alternatives first and the recommended route last.
+            // Draw the recommended route first and alternatives afterward,
+            // so alternative paths remain visible when routes share road segments.
             .sort(
               (a, b) =>
-                Number(a?.recommended === true) -
-                Number(b?.recommended === true)
+                Number(b?.recommended === true) -
+                Number(a?.recommended === true)
             )
             .map((route, index) => {
 
@@ -3046,8 +3137,8 @@ function SafeRouteMain() {
                     positions={routeCoordinates}
                     pathOptions={{
                       color: routeColor,
-                      weight: isSelected ? 8 : isRecommended ? 7 : 5,
-                      opacity: isSelected ? 1 : isRecommended ? 1 : 0.72,
+                      weight: isSelected ? 8 : isRecommended ? 7 : 7,
+                      opacity: 1,
                       dashArray,
                       lineCap: "round",
                       lineJoin: "round"
@@ -3382,6 +3473,23 @@ function SafeRouteMain() {
                             ? "✓ Selected Path"
                             : "Select This Path"}
                         </button>
+                        {Number(selectedRouteId) === Number(route.route_id) && !navigationActive && (
+                          <button
+                            onClick={startNavigation}
+                            style={{
+                              marginLeft: "8px",
+                              border: "none",
+                              borderRadius: "9px",
+                              padding: "9px 13px",
+                              background: "#16a34a",
+                              color: "#ffffff",
+                              fontWeight: 800,
+                              cursor: "pointer"
+                            }}
+                          >
+                            ▶ Start Navigation
+                          </button>
+                        )}
                       </div>
 
                     </div>
@@ -3404,7 +3512,9 @@ function SafeRouteMain() {
                       NASA NIGHTTIME LIGHTING
                   ========================================== */}
 
-                  <div className="info-section lighting-section">
+                  <details className="route-detail-panel" style={{ margin: "14px 0", borderRadius: "14px", overflow: "hidden", border: "1px solid #dbe4ee", background: "#ffffff" }}>
+<summary style={{ cursor: "pointer", listStyle: "none", padding: "15px 18px", fontWeight: 800, color: "#12345a", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>🌙 Nighttime Lighting<span style={{ color: "#2563eb", fontSize: "0.88rem" }}>Click to view</span></summary>
+<div className="info-section lighting-section">
 
                     <h3>
                       🌙 Nighttime Lighting
@@ -3467,13 +3577,16 @@ function SafeRouteMain() {
                     </p>
 
                   </div>
+</details>
 
 
                   {/* ==========================================
                       TOMTOM TRAFFIC
                   ========================================== */}
 
-                  <div className="info-section traffic-section">
+                  <details className="route-detail-panel" style={{ margin: "14px 0", borderRadius: "14px", overflow: "hidden", border: "1px solid #dbe4ee", background: "#ffffff" }}>
+<summary style={{ cursor: "pointer", listStyle: "none", padding: "15px 18px", fontWeight: 800, color: "#12345a", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>🚗 Real-Time Traffic<span style={{ color: "#2563eb", fontSize: "0.88rem" }}>Click to view</span></summary>
+<div className="info-section traffic-section">
 
                     <h3>
                       🚗 Real-Time Traffic
@@ -3641,13 +3754,16 @@ function SafeRouteMain() {
                     </p>
 
                   </div>
+</details>
 
 
                   {/* ==========================================
                       OPEN-METEO WEATHER
                   ========================================== */}
 
-                  <div className="info-section weather-section">
+                  <details className="route-detail-panel" style={{ margin: "14px 0", borderRadius: "14px", overflow: "hidden", border: "1px solid #dbe4ee", background: "#ffffff" }}>
+<summary style={{ cursor: "pointer", listStyle: "none", padding: "15px 18px", fontWeight: 800, color: "#12345a", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>🌦️ Weather Conditions<span style={{ color: "#2563eb", fontSize: "0.88rem" }}>Click to view</span></summary>
+<div className="info-section weather-section">
 
                     <h3>
                       🌦️ Live Weather
@@ -3849,13 +3965,16 @@ function SafeRouteMain() {
                     </p>
 
                   </div>
+</details>
 
 
                   {/* ==========================================
                       CRIME DATA
                   ========================================== */}
 
-                  <div className="info-section crime-section">
+                  <details className="route-detail-panel" style={{ margin: "14px 0", borderRadius: "14px", overflow: "hidden", border: "1px solid #dbe4ee", background: "#ffffff" }}>
+<summary style={{ cursor: "pointer", listStyle: "none", padding: "15px 18px", fontWeight: 800, color: "#12345a", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>🚨 Crime & Safety Details<span style={{ color: "#2563eb", fontSize: "0.88rem" }}>Click to view</span></summary>
+<div className="info-section crime-section">
 
                     <h3>
                       🔴 Crime & Safety
@@ -4003,13 +4122,16 @@ function SafeRouteMain() {
                     </p>
 
                   </div>
+</details>
 
 
                   {/* ==========================================
                       FINAL AI SAFETY PREDICTION
                   ========================================== */}
 
-                  <div
+                  <details className="route-detail-panel" style={{ margin: "14px 0", borderRadius: "14px", overflow: "hidden", border: "1px solid #dbe4ee", background: "#ffffff" }}>
+<summary style={{ cursor: "pointer", listStyle: "none", padding: "15px 18px", fontWeight: 800, color: "#12345a", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>🧠 AI Safety Prediction<span style={{ color: "#2563eb", fontSize: "0.88rem" }}>Click to view</span></summary>
+<div
                     className="info-section"
                     style={{
                       marginTop: "24px",
@@ -4223,6 +4345,7 @@ function SafeRouteMain() {
                     </p>
 
                   </div>
+</details>
 
 
                   {/* ==========================================

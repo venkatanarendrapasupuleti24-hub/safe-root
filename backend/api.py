@@ -188,7 +188,7 @@ class RouteRequest(BaseModel):
 
     destination: str
 
-    max_routes: int = 10
+    max_routes: int = 3
 
     excluded_route_keys: list[str] = []
 
@@ -426,248 +426,200 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 
 def ensure_route_reaches_destination(route, destination):
-    """
-    GraphHopper should return a route ending at the final point.
-    This guard makes that requirement explicit for our candidate routes.
+    """Reject routes whose returned geometry does not reach the destination.
 
-    If a candidate route unexpectedly stops far away from the requested
-    destination, calculate a connector from that final point to the real
-    destination and append it to the route. This prevents the frontend
-    from displaying an alternative route that appears to finish somewhere
-    else.
+    Do not append a straight/secondary connector to a bad candidate: that can
+    hide a routing error and create misleading geometry on the frontend.
     """
-
     if route is None:
         return None
 
-    coordinates = (
-        route.get("points", {})
-        .get("coordinates", [])
-    )
-
-    if not coordinates:
-        return route
+    coordinates = route.get("points", {}).get("coordinates", [])
+    if len(coordinates) < 2:
+        return None
 
     last_lon, last_lat = coordinates[-1]
     destination_lat, destination_lon = destination
-
     gap_km = haversine_km(
-        last_lat,
-        last_lon,
-        destination_lat,
-        destination_lon
+        last_lat, last_lon, destination_lat, destination_lon
     )
 
-    print(
-        f"Route endpoint gap to destination: {gap_km:.3f} km"
-    )
-
-    # GraphHopper normally snaps the requested destination to a nearby
-    # road. Small differences are therefore normal. Only repair a route
-    # when the endpoint is clearly far from the requested destination.
-    MAX_ENDPOINT_GAP_KM = 1.5
-
-    if gap_km <= MAX_ENDPOINT_GAP_KM:
-        return route
-
-    print(
-        "WARNING: Route did not finish near the requested destination. "
-        "Adding destination connector..."
-    )
-
-    connector = get_route([
-        (last_lat, last_lon),
-        destination
-    ])
-
-    if connector is None:
-        print(
-            "WARNING: Could not create destination connector. "
-            "Keeping original route."
-        )
-        return route
-
-    connector_coordinates = (
-        connector.get("points", {})
-        .get("coordinates", [])
-    )
-
-    if len(connector_coordinates) < 2:
-        return route
-
-    # Avoid duplicating the joining coordinate.
-    combined_coordinates = (
-        coordinates
-        + connector_coordinates[1:]
-    )
-
-    route["points"]["coordinates"] = combined_coordinates
-
-    route["distance"] = (
-        float(route.get("distance", 0))
-        + float(connector.get("distance", 0))
-    )
-
-    route["time"] = (
-        int(route.get("time", 0))
-        + int(connector.get("time", 0))
-    )
-
-    # The route now explicitly ends at the connector's destination.
-    final_lon, final_lat = combined_coordinates[-1]
-    final_gap_km = haversine_km(
-        final_lat,
-        final_lon,
-        destination_lat,
-        destination_lon
-    )
-
-    print(
-        f"Destination connector added. Final endpoint gap: "
-        f"{final_gap_km:.3f} km"
-    )
+    print(f"Route endpoint gap to destination: {gap_km:.3f} km")
+    if gap_km > 1.5:
+        print("Rejecting route: endpoint is too far from the requested destination.")
+        return None
 
     return route
 
 
 # ============================================================
-# CREATE ALTERNATIVE ROUTE CANDIDATES
+# SNAP DETOUR POINTS TO THE CAR ROAD NETWORK
+# ============================================================
+
+def get_nearest_road_point(point):
+    """Snap a candidate (latitude, longitude) to GraphHopper's car network."""
+    latitude, longitude = point
+    nearest_url = GRAPHOPPER_URL.rsplit("/", 1)[0] + "/nearest"
+    params = [
+        ("profile", "car"),
+        ("point", f"{latitude},{longitude}"),
+    ]
+
+    if "graphhopper.com" in GRAPHOPPER_URL and GRAPHHOPPER_API_KEY:
+        params.append(("key", GRAPHHOPPER_API_KEY))
+
+    try:
+        response = requests.get(nearest_url, params=params, timeout=20)
+        if response.status_code != 200:
+            print("GraphHopper nearest error:", response.text[:300])
+            return None
+
+        data = response.json()
+        snapped = data.get("coordinates")
+        if not snapped and isinstance(data.get("geometry"), dict):
+            snapped = data["geometry"].get("coordinates")
+        if not isinstance(snapped, (list, tuple)) or len(snapped) < 2:
+            print("GraphHopper nearest returned no usable coordinates.")
+            return None
+
+        snapped_lon, snapped_lat = float(snapped[0]), float(snapped[1])
+        snap_gap = haversine_km(latitude, longitude, snapped_lat, snapped_lon)
+        if snap_gap > 3.0:
+            print(f"Rejecting detour point: nearest car road is {snap_gap:.2f} km away.")
+            return None
+
+        return (snapped_lat, snapped_lon)
+    except Exception as error:
+        print("GraphHopper nearest request failed:", error)
+        return None
+
+
+# ============================================================
+# CREATE REALISTIC ALTERNATIVE ROUTE CANDIDATES
 # ============================================================
 
 def create_candidate_points(route):
+    """Create small lateral detour candidates along the main route.
+
+    Candidate points are placed 750 metres to either side of the route at
+    25%, 50%, and 75% of its geometry, then snapped to the car road network.
     """
-    Generate strong lateral detour points so GraphHopper is much more
-    likely to return genuinely different roads.
-
-    The previous fast version used mostly latitude/longitude offsets that
-    could move along the same corridor. This version calculates a rough
-    perpendicular direction from the route itself and creates detours at
-    20%, 35%, 50%, 65%, and 80% of the route.
-
-    Maximum 12 candidates keeps the response much faster than the old
-    40-candidate version while giving GraphHopper more opportunities to
-    find 3 distinct routes.
-    """
-
-    coordinates = (
-        route.get("points", {})
-        .get("coordinates", [])
-    )
-
+    coordinates = route.get("points", {}).get("coordinates", [])
     total_points = len(coordinates)
-
     if total_points < 20:
         return []
 
-    # Use the overall route direction to calculate a perpendicular
-    # direction. Coordinates are [longitude, latitude].
-    start_lon, start_lat = coordinates[0]
-    end_lon, end_lat = coordinates[-1]
-
-    dx = end_lon - start_lon
-    dy = end_lat - start_lat
-
-    length = (dx * dx + dy * dy) ** 0.5
-
-    if length == 0:
-        return []
-
-    # Perpendicular unit vector in degree-space.
-    perp_lon = -dy / length
-    perp_lat = dx / length
-
     candidates = []
-
-    # Strong lateral offsets. Roughly 8-20+ km depending on latitude.
-    # Both sides are tested so we can find roads on either side.
-    candidate_patterns = [
-        (0.12, 0.06), (0.12, -0.06),
-        (0.20, 0.10), (0.20, -0.10),
-        (0.28, 0.12), (0.28, -0.12),
-        (0.35, 0.14), (0.35, -0.14),
-        (0.43, 0.16), (0.43, -0.16),
-        (0.50, 0.18), (0.50, -0.18),
-        (0.57, 0.16), (0.57, -0.16),
-        (0.65, 0.14), (0.65, -0.14),
-        (0.72, 0.12), (0.72, -0.12),
-        (0.80, 0.10), (0.80, -0.10),
-        (0.88, 0.08), (0.88, -0.08),
-        (0.50, 0.24), (0.50, -0.24),
-        (0.35, 0.22), (0.35, -0.22),
-        (0.65, 0.22), (0.65, -0.22),
+    patterns = [
+        (0.25, 0.75),
+        (0.50, 0.75),
+        (0.75, 0.75),
     ]
 
-    for position, offset in candidate_patterns:
-        index = min(
-            int(total_points * position),
-            total_points - 1
-        )
-
+    for fraction, offset_km in patterns:
+        index = max(2, min(int((total_points - 1) * fraction), total_points - 3))
+        before = coordinates[max(0, index - 8)]
+        after = coordinates[min(total_points - 1, index + 8)]
         lon, lat = coordinates[index]
 
-        candidate_lon = lon + (perp_lon * offset)
-        candidate_lat = lat + (perp_lat * offset)
+        mean_lat_rad = math.radians(float(lat))
+        east = (float(after[0]) - float(before[0])) * math.cos(mean_lat_rad)
+        north = float(after[1]) - float(before[1])
+        magnitude = math.hypot(east, north)
+        if magnitude < 1e-9:
+            continue
 
-        candidates.append(
-            (candidate_lat, candidate_lon)
-        )
+        perp_east = -north / magnitude
+        perp_north = east / magnitude
 
-    return candidates
+        for side in (1.0, -1.0):
+            east_offset = perp_east * offset_km * side
+            north_offset = perp_north * offset_km * side
+            candidate_lat = float(lat) + north_offset / 111.32
+            longitude_scale = max(111.32 * math.cos(mean_lat_rad), 1.0)
+            candidate_lon = float(lon) + east_offset / longitude_scale
+            candidates.append((candidate_lat, candidate_lon))
+
+    unique = []
+    seen = set()
+    for latitude, longitude in candidates:
+        key = (round(latitude, 5), round(longitude, 5))
+        if key not in seen:
+            seen.add(key)
+            unique.append((latitude, longitude))
+
+    return unique
 
 
 # ============================================================
-# ROUTE SIMILARITY
+# ROUTE SIMILARITY AND GEOMETRY CHECKS
 # ============================================================
 
-def is_similar_route(
-    route1,
-    route2
-):
+def _sample_route_coordinates(route, start_fraction=0.15, end_fraction=0.85, count=40):
+    coordinates = route.get("points", {}).get("coordinates", [])
+    if len(coordinates) < 2:
+        return []
+    start = int((len(coordinates) - 1) * start_fraction)
+    end = max(start + 1, int((len(coordinates) - 1) * end_fraction))
+    if end <= start:
+        return []
+    return [
+        coordinates[round(start + (end - start) * i / (count - 1))]
+        for i in range(count)
+    ]
 
-    distance_difference = (
 
-        abs(
+def _route_overlap_ratio(route1, route2, tolerance_km=0.15):
+    """Estimate shared middle-route geometry, excluding shared endpoints."""
+    points1 = _sample_route_coordinates(route1)
+    points2 = _sample_route_coordinates(route2)
+    if not points1 or not points2:
+        return 0.0
 
-            route1["distance"]
-            -
-            route2["distance"]
-
+    matched = 0
+    for lon1, lat1 in points1:
+        nearest = min(
+            haversine_km(float(lat1), float(lon1), float(lat2), float(lon2))
+            for lon2, lat2 in points2
         )
-        /
-        1000
-
-    )
-
-
-    time_difference = (
-
-        abs(
-
-            route1["time"]
-            -
-            route2["time"]
-
-        )
-        /
-        60000
-
-    )
+        if nearest <= tolerance_km:
+            matched += 1
+    return matched / len(points1)
 
 
-    if (
+def is_similar_route(route1, route2):
+    distance1 = float(route1.get("distance", 0) or 0)
+    distance2 = float(route2.get("distance", 0) or 0)
+    time1 = float(route1.get("time", 0) or 0)
+    time2 = float(route2.get("time", 0) or 0)
 
-        distance_difference < 3
+    distance_difference_km = abs(distance1 - distance2) / 1000.0
+    time_difference_minutes = abs(time1 - time2) / 60000.0
 
-        and
-
-        time_difference < 8
-
-    ):
-
+    if distance_difference_km < 3 and time_difference_minutes < 8:
         return True
 
+    return _route_overlap_ratio(route1, route2) >= 0.85
 
-    return False
+
+def is_reasonable_alternative(candidate_route, main_route):
+    """Reject alternatives that are implausibly longer than the main route."""
+    candidate_distance = float(candidate_route.get("distance", 0) or 0)
+    main_distance = float(main_route.get("distance", 0) or 0)
+    if candidate_distance <= 0 or main_distance <= 0:
+        return False
+
+    # Allow a genuine detour, but cap it at both +25% and +25 km.
+    maximum_distance = min(main_distance * 1.25, main_distance + 25000)
+    if candidate_distance > maximum_distance:
+        print(
+            "Rejecting excessive detour: "
+            f"{candidate_distance / 1000:.2f} km vs "
+            f"{main_distance / 1000:.2f} km main route."
+        )
+        return False
+
+    return True
 
 
 # ============================================================
@@ -1720,7 +1672,7 @@ def generate_routes(
         destination
     )
 
-    target_route_count = min(max(int(request.max_routes or 10), 1), 10)
+    target_route_count = min(max(int(request.max_routes or 3), 1), 3)
     excluded_route_keys = set(request.excluded_route_keys or [])
 
     print(f"Requested route limit: {target_route_count}")
@@ -1768,13 +1720,15 @@ def generate_routes(
 
     # Validate the main route endpoint as well.
     main_route = ensure_route_reaches_destination(
-
         main_route,
-
         destination
-
     )
 
+    if main_route is None:
+        return {
+            "success": False,
+            "message": "The calculated route did not reach the requested destination. Please try another location."
+        }
 
     main_route_key = make_route_key(request.source, request.destination, main_route.get("points", {}).get("coordinates", []))
 
@@ -1809,8 +1763,9 @@ def generate_routes(
     )
 
 
-    # Allow enough candidate attempts to discover up to 10 distinct routes.
-    candidates = candidates[:26]
+    # Try a small number of detours to find up to 3 total routes.
+    # One main route + at most two distinct alternatives.
+    candidates = candidates[:6]
 
     for candidate_number, candidate in enumerate(candidates, start=1):
 
@@ -1823,14 +1778,14 @@ def generate_routes(
             break
 
 
+        snapped_candidate = get_nearest_road_point(candidate)
+        if snapped_candidate is None:
+            continue
+
         candidate_route = get_route([
-
             source,
-
-            candidate,
-
+            snapped_candidate,
             destination
-
         ])
 
 
@@ -1839,9 +1794,7 @@ def generate_routes(
             continue
 
 
-        # IMPORTANT: every candidate must finish at the SAME requested
-        # destination. If GraphHopper ever returns an endpoint that is
-        # clearly elsewhere, repair it before accepting the route.
+        # Reject candidates that do not finish near the requested destination.
         candidate_route = ensure_route_reaches_destination(
 
             candidate_route,
@@ -1852,7 +1805,9 @@ def generate_routes(
 
 
         if candidate_route is None:
+            continue
 
+        if not is_reasonable_alternative(candidate_route, main_route):
             continue
 
         candidate_coordinates = candidate_route.get("points", {}).get("coordinates", [])
