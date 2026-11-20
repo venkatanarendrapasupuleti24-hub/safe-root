@@ -1646,6 +1646,12 @@ function App() {
 }
 
 function SafeRouteMain() {
+  // Panels stay closed initially so the map is the primary view.
+  const [activePanel, setActivePanel] = useState(null);
+  const togglePanel = (panel) => {
+    setActivePanel((current) => current === panel ? null : panel);
+  };
+
   const [source, setSource] = useState("");
 
   const [destination, setDestination] = useState("");
@@ -2800,15 +2806,37 @@ function SafeRouteMain() {
         <div>
 
           <h1>
-            🛡️ Safe Route Finder
+            <span className="sr-brand-mark">✦</span> SafeRoute
           </h1>
 
           <p>
-            Find safer routes using traffic, nighttime
-            lighting, live weather and crime data
+            AI-powered safer journeys · Live route intelligence
           </p>
 
         </div>
+
+        <nav className="sr-panel-toolbar" aria-label="Dashboard panels">
+          <button type="button" className={activePanel === "search" ? "active" : ""} onClick={() => togglePanel("search")} title="Plan route" aria-label="Show route search">
+            <span aria-hidden="true">⌕</span><small>Plan</small>
+          </button>
+          <button type="button" className={activePanel === "safety" ? "active" : ""} onClick={() => togglePanel("safety")} title="AI safety analysis" aria-label="Show AI safety analysis">
+            <span aria-hidden="true">🛡</span><small>Safety</small>
+          </button>
+          <button type="button" className={activePanel === "routes" ? "active" : ""} onClick={() => togglePanel("routes")} title="Route options" aria-label="Show route options">
+            <span aria-hidden="true">⇄</span><small>Routes</small>
+          </button>
+          <button type="button" className={activePanel === "navigation" ? "active" : ""} onClick={() => togglePanel("navigation")} title="Navigation" aria-label="Show navigation">
+            <span aria-hidden="true">➤</span><small>Navigate</small>
+          </button>
+          <button type="button" className={activePanel === "liveSafety" ? "active" : ""} onClick={() => togglePanel("liveSafety")} title="Live area safety" aria-label="Show live area safety">
+            <span aria-hidden="true">◉</span><small>Live</small>
+          </button>
+          {activePanel && (
+            <button type="button" className="sr-panel-close" onClick={() => setActivePanel(null)} title="Close panel" aria-label="Close panel">
+              <span aria-hidden="true">×</span><small>Map</small>
+            </button>
+          )}
+        </nav>
 
       </header>
 
@@ -2817,7 +2845,8 @@ function SafeRouteMain() {
           SEARCH SECTION
       ==================================================== */}
 
-      <section className="search-section">
+      {activePanel === "search" && (
+      <section className="search-section" aria-label="Plan your safe route">
 
         <div className="input-group">
 
@@ -2901,6 +2930,7 @@ function SafeRouteMain() {
         </button>
 
       </section>
+      )}
 
 
       {/* ====================================================
@@ -2918,7 +2948,7 @@ function SafeRouteMain() {
       )}
 
 
-      {navigationActive && (
+      {activePanel === "navigation" && navigationActive && (
         <NavigationPanel
           selectedRoute={selectedRoute}
           navigationActive={navigationActive}
@@ -2942,7 +2972,7 @@ function SafeRouteMain() {
         />
       )}
 
-      {navigationActive && (
+      {activePanel === "liveSafety" && navigationActive && (
         <LiveSafetyPanel
           liveSafety={liveSafety}
           loading={liveSafetyLoading}
@@ -2951,11 +2981,29 @@ function SafeRouteMain() {
       )}
 
 
+      {activePanel === "navigation" && !navigationActive && (
+        <div className="sr-floating-panel sr-panel-empty">
+          <button type="button" className="sr-panel-x" onClick={() => setActivePanel(null)} aria-label="Close panel">×</button>
+          <h2>Navigation</h2>
+          <p>Find a route and select it first. Then start navigation to see live GPS guidance, turn-by-turn instructions and rerouting here.</p>
+          <button type="button" onClick={() => setActivePanel("search")}>Plan a route</button>
+        </div>
+      )}
+
+      {activePanel === "liveSafety" && !navigationActive && (
+        <div className="sr-floating-panel sr-panel-empty">
+          <button type="button" className="sr-panel-x" onClick={() => setActivePanel(null)} aria-label="Close panel">×</button>
+          <h2>Live area safety</h2>
+          <p>Start navigation to activate live location-based safety checks.</p>
+        </div>
+      )}
+
+
       {/* ====================================================
           MAP
       ==================================================== */}
 
-      <section className="map-section">
+      <section className="map-section" aria-label="Live route map">
 
         <MapContainer
           center={mapCenter}
@@ -3172,10 +3220,41 @@ function SafeRouteMain() {
 
 
       {/* ====================================================
+          FLOATING SAFETY OVERVIEW
+      ==================================================== */}
+      {selectedRoute && activePanel === "safety" && (
+        <aside className="sr-safety-dock">
+          <div className="sr-dock-heading">
+            <div>
+              <span className="sr-eyebrow">SAFEROUTE AI ANALYSIS</span>
+              <h2>Route safety</h2>
+            </div>
+            <span className="sr-live-dot" title="Route analysis available" />
+          </div>
+          <div className="sr-score-row">
+            <strong>{Number(selectedRoute.safety_score ?? selectedRoute.final_safety_score ?? selectedRoute.ai_safety_score ?? 0).toFixed(1)}</strong>
+            <span>/ 100<br/><small>{selectedRoute.risk_level || "Safety score"}</small></span>
+          </div>
+          <div className="sr-score-track"><span style={{ width: `${Math.max(0, Math.min(100, Number(selectedRoute.safety_score ?? selectedRoute.final_safety_score ?? selectedRoute.ai_safety_score ?? 0)))}%` }} /></div>
+          <div className="sr-dock-metrics">
+            <div><span>🌙 Lighting</span><strong>{Number(selectedRoute.lighting_score ?? 0).toFixed(0)}<small>/100</small></strong></div>
+            <div><span>🚦 Traffic</span><strong>{Number(selectedRoute.traffic_score ?? 0).toFixed(0)}<small>/100</small></strong></div>
+            <div><span>🌦 Weather</span><strong>{Number(selectedRoute.weather_score ?? 0).toFixed(0)}<small>/100</small></strong></div>
+            <div><span>🛡 Crime safety</span><strong>{Number(selectedRoute.crime_safety_score ?? 0).toFixed(0)}<small>/100</small></strong></div>
+          </div>
+          <div className="sr-dock-footer">
+            <span>Route {selectedRoute.route_id} · {selectedRoute.distance_km} km</span>
+            <span>{selectedRoute.time_minutes} min</span>
+          </div>
+        </aside>
+      )}
+
+
+      {/* ====================================================
           MAP LEGEND
       ==================================================== */}
 
-      {routes.length > 0 && (
+      {routes.length > 0 && activePanel === "routes" && (
 
         <div
           className="route-legend"
@@ -3252,7 +3331,7 @@ function SafeRouteMain() {
           ROUTE RESULTS
       ==================================================== */}
 
-      {routes.length > 0 && (
+      {routes.length > 0 && activePanel === "routes" && (
 
         <section className="routes-section">
 
@@ -4498,6 +4577,25 @@ function SafeRouteMain() {
           </div>
 
         )}
+
+
+      {activePanel === "routes" && routes.length === 0 && (
+        <div className="sr-floating-panel sr-panel-empty">
+          <button type="button" className="sr-panel-x" onClick={() => setActivePanel(null)} aria-label="Close panel">×</button>
+          <h2>Route options</h2>
+          <p>Search for a journey first. Your route alternatives, safety rankings, distance, travel time and ratings will appear here.</p>
+          <button type="button" onClick={() => setActivePanel("search")}>Plan a route</button>
+        </div>
+      )}
+
+      {activePanel === "safety" && !selectedRoute && (
+        <div className="sr-floating-panel sr-panel-empty">
+          <button type="button" className="sr-panel-x" onClick={() => setActivePanel(null)} aria-label="Close panel">×</button>
+          <h2>SafeRoute AI analysis</h2>
+          <p>Search for a journey to view the AI safety score and traffic, lighting, weather and crime indicators.</p>
+          <button type="button" onClick={() => setActivePanel("search")}>Plan a route</button>
+        </div>
+      )}
 
 
       {/* ====================================================
