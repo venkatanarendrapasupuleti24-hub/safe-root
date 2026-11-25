@@ -188,7 +188,8 @@ class RouteRequest(BaseModel):
 
     destination: str
 
-    max_routes: int = 3
+    # Number of distinct routes requested by the frontend (1 to 10).
+    max_routes: int = 10
 
     excluded_route_keys: list[str] = []
 
@@ -510,10 +511,13 @@ def create_candidate_points(route):
         return []
 
     candidates = []
+    # Spread candidate detours across the route and vary their distance
+    # from the original road. Both sides are explored so GraphHopper can
+    # discover genuinely different road corridors.
     patterns = [
-        (0.25, 0.75),
-        (0.50, 0.75),
-        (0.75, 0.75),
+        (fraction, offset_km)
+        for fraction in (0.15, 0.30, 0.45, 0.60, 0.75, 0.85)
+        for offset_km in (0.50, 0.90, 1.30)
     ]
 
     for fraction, offset_km in patterns:
@@ -1672,7 +1676,11 @@ def generate_routes(
         destination
     )
 
-    target_route_count = min(max(int(request.max_routes or 3), 1), 3)
+    # Support up to 10 total routes, including the main route.
+    try:
+        target_route_count = min(max(int(request.max_routes or 10), 1), 10)
+    except (TypeError, ValueError):
+        target_route_count = 10
     excluded_route_keys = set(request.excluded_route_keys or [])
 
     print(f"Requested route limit: {target_route_count}")
@@ -1763,9 +1771,10 @@ def generate_routes(
     )
 
 
-    # Try a small number of detours to find up to 3 total routes.
-    # One main route + at most two distinct alternatives.
-    candidates = candidates[:6]
+    # Try the full candidate set until the requested number of distinct
+    # routes is reached. Candidate generation creates up to 36 detour points.
+    # The similarity and distance checks below prevent near-duplicate or
+    # excessively long alternatives from being returned.
 
     for candidate_number, candidate in enumerate(candidates, start=1):
 
