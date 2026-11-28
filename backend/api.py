@@ -1,13 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+import threading
+import re
 import requests
 import os
 import math
 from datetime import datetime
 import time
 import hashlib
+from difflib import SequenceMatcher
 
 import pandas as pd
 
@@ -188,6 +190,10 @@ class RouteRequest(BaseModel):
 
     destination: str
 
+    # Optional current GPS origin as [latitude, longitude].
+    # When supplied, this takes priority over geocoding the source text.
+    source_coordinates: list[float] | None = None
+
     # Number of distinct routes requested by the frontend (1 to 10).
     max_routes: int = 10
 
@@ -218,84 +224,267 @@ class RerouteRequest(BaseModel):
 # GEOCODING
 # ============================================================
 
+GEOCODING_CACHE = {}
+GEOCODING_LOCK = threading.Lock()
+LAST_GEOCODING_REQUEST = 0.0
+
+# Andhra Pradesh search-area bias for Nominatim.
+# Format: west, north, east, south
+AP_VIEWBOX = "76.7,19.2,84.8,12.5"
+
+# Manual fallback for the confirmed Yellayapalli village.
+# These are approximate village-level coordinates, not a house address.
+# Verify the snapped point on the map before using this in production.
+YELLAYAPALLI_COORDINATES = (14.06048, 79.301944)
+
+VILLAGE_COORDINATES = {
+    "yellayapalli": YELLAYAPALLI_COORDINATES,
+    "yellaiahpalli": YELLAYAPALLI_COORDINATES,
+    "yallayapalli": YELLAYAPALLI_COORDINATES,
+    "yellayapalli mw": YELLAYAPALLI_COORDINATES,
+}
+
+
+def normalize_geocoding_name(value):
+    """Normalize a place name for spelling-tolerant matching."""
+    value = str(value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def get_spelling_variants(place_name):
+    """Create common transliteration variants without a manual place dictionary.
+
+    Examples:
+      Tirupathi -> Tirupati
+      Thirupathi -> Tirupati
+      Tirupathy -> Tirupaty / Tirupati-like matching
+
+    The original spelling is always searched as well.
+    """
+    original = str(place_name or "").strip()
+    # Only the first comma-separated part is the actual place name. Remaining
+    # parts (mandal/district/state) are retained as search context separately.
+    place_part = original.split(",", 1)[0].strip()
+    normalized = normalize_geocoding_name(place_part)
+
+    variants = [place_part]
+    canonical = normalized
+
+    # Common Indian-English transliteration differences.
+    replacements = [
+        (r"^th", "t"),
+        (r"th", "t"),
+        (r"dh", "d"),
+        (r"ph", "p"),
+        (r"bh", "b"),
+        (r"kh", "k"),
+        (r"sh", "s"),
+        (r"aa", "a"),
+        (r"ee", "i"),
+        (r"oo", "u"),
+        (r"iy", "i"),
+        (r"y$", "i"),
+    ]
+
+    for pattern, replacement in replacements:
+        canonical = re.sub(pattern, replacement, canonical)
+
+    if canonical and canonical != normalized:
+        variants.append(canonical)
+
+    # Also try a compact spelling to handle spaces/hyphens in village names.
+    compact = normalized.replace(" ", "")
+    if compact and compact not in variants:
+        variants.append(compact)
+
+    # Preserve any supplied administrative context while keeping requests few.
+    context = original.split(",", 1)[1].strip() if "," in original else ""
+    queries = []
+    for variant in variants:
+        queries.append(f"{variant}, {context}" if context else variant)
+        queries.append(
+            f"{variant}, Andhra Pradesh, India"
+        )
+
+    # Nominatim public endpoint should not be hammered. A small, deduplicated
+    # set of spelling attempts is enough for this fallback geocoder.
+    return list(dict.fromkeys(q for q in queries if q))[:4]
+
+
+def _place_name_similarity(query_name, result):
+    """Compare the requested name with names returned by Nominatim."""
+    query = normalize_geocoding_name(query_name)
+    address = result.get("address", {}) or {}
+
+    candidate_names = [
+        result.get("name", ""),
+        result.get("display_name", "").split(",")[0],
+        address.get("village", ""),
+        address.get("town", ""),
+        address.get("city", ""),
+        address.get("hamlet", ""),
+        address.get("municipality", ""),
+        address.get("suburb", ""),
+        address.get("county", ""),
+    ]
+
+    best = 0.0
+    for candidate in candidate_names:
+        candidate = normalize_geocoding_name(candidate)
+        if not candidate:
+            continue
+        if candidate == query:
+            return 1.0
+        score = SequenceMatcher(None, query, candidate).ratio()
+        # Token comparison helps when the geocoder includes a suffix/prefix.
+        query_tokens = set(query.split())
+        candidate_tokens = set(candidate.split())
+        if query_tokens and candidate_tokens:
+            token_score = len(query_tokens & candidate_tokens) / len(query_tokens | candidate_tokens)
+            score = max(score, token_score)
+        best = max(best, score)
+    return best
+
+
 def get_coordinates(place_name):
+    global LAST_GEOCODING_REQUEST
 
-    params = {
-
-        "q":
-            f"{place_name}, Andhra Pradesh, India",
-
-        "format":
-            "json",
-
-        "limit":
-            1
-    }
-
-
-    headers = {
-
-        "User-Agent":
-            "SafeRouteFinder/1.0"
-    }
-
-
-    try:
-
-        response = requests.get(
-
-            GEOCODING_URL,
-
-            params=params,
-
-            headers=headers,
-
-            timeout=20
-
-        )
-
-
-        response.raise_for_status()
-
-
-        data = response.json()
-
-
-        if not data:
-
-            return None
-
-
-        latitude = float(
-            data[0]["lat"]
-        )
-
-
-        longitude = float(
-            data[0]["lon"]
-        )
-
-
-        print(
-
-            f"Location found: "
-            f"{place_name} -> "
-            f"{latitude}, {longitude}"
-
-        )
-
-
-        return latitude, longitude
-
-
-    except Exception as error:
-
-        print(
-            "Geocoding error:",
-            error
-        )
-
+    if not place_name or not str(place_name).strip():
         return None
+
+    place_name = str(place_name).strip()
+    normalized_name = normalize_geocoding_name(place_name)
+
+    # 1. Keep the project's verified Yellayapalli fallback.
+    for alias, coordinates in VILLAGE_COORDINATES.items():
+        if normalized_name == alias or normalized_name.startswith(alias + " "):
+            print(
+                f"Using SafeRoute village fallback: {place_name} "
+                f"-> {coordinates}"
+            )
+            return coordinates
+
+    # 2. Cache successful lookups by normalized input.
+    cache_key = normalized_name
+    if cache_key in GEOCODING_CACHE:
+        print(f"Geocoding cache hit: {place_name}")
+        return GEOCODING_CACHE[cache_key]
+
+    # 3. Search original spelling and common transliteration variants.
+    queries = get_spelling_variants(place_name)
+    requested_place = place_name.split(",", 1)[0].strip()
+    headers = {
+        # Configure SAFEROUTE_CONTACT_EMAIL with a real project contact email.
+        "User-Agent": (
+            "SafeRouteFinder/1.0 "
+            f"(contact: {os.getenv('SAFEROUTE_CONTACT_EMAIL', 'contact-not-configured')})"
+        )
+    }
+
+    best_match = None
+    best_score = 0.0
+
+    for query in queries:
+        params = {
+            "q": query,
+            "format": "jsonv2",
+            "limit": 8,
+            "countrycodes": "in",
+            "viewbox": AP_VIEWBOX,
+            "addressdetails": 1,
+        }
+
+        try:
+            # Respect Nominatim's public-service rate limit.
+            with GEOCODING_LOCK:
+                wait_time = 1.1 - (time.time() - LAST_GEOCODING_REQUEST)
+                if wait_time > 0:
+                    time.sleep(wait_time)
+
+                response = requests.get(
+                    GEOCODING_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=20,
+                )
+                LAST_GEOCODING_REQUEST = time.time()
+
+            response.raise_for_status()
+            results = response.json()
+            if not isinstance(results, list) or not results:
+                print(f"No geocoding result for: {query}")
+                continue
+
+            for item in results:
+                address = item.get("address", {}) or {}
+                state = str(address.get("state", "")).strip().lower()
+                country = str(address.get("country", "")).strip().lower()
+
+                try:
+                    latitude = float(item["lat"])
+                    longitude = float(item["lon"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+                if not (math.isfinite(latitude) and math.isfinite(longitude)):
+                    continue
+                if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                    continue
+                if country and country not in {"india", "भारत"}:
+                    continue
+
+                inside_ap_bounds = (
+                    12.0 <= latitude <= 20.0
+                    and 76.0 <= longitude <= 85.5
+                )
+                is_ap = "andhra pradesh" in state or inside_ap_bounds
+                if not is_ap:
+                    continue
+
+                # Compare the returned locality with the requested locality,
+                # not with the entire "village, mandal, district" input.
+                score = _place_name_similarity(requested_place, item)
+
+                # The generated spelling variant may exactly match the result
+                # even when the original user spelling differs.
+                query_place = query.split(",", 1)[0].strip()
+                score = max(score, _place_name_similarity(query_place, item))
+
+                # Prefer explicit Andhra Pradesh state metadata when scores tie.
+                if "andhra pradesh" in state:
+                    score += 0.03
+
+                if score > best_score:
+                    best_score = score
+                    best_match = (latitude, longitude, item)
+
+        except requests.RequestException as error:
+            print(f"Nominatim request failed for '{query}': {error}")
+            # Stop on network/service errors; do not send repeated requests.
+            break
+        except (ValueError, TypeError) as error:
+            print("Geocoding response error:", error)
+
+    # Do not silently route to an unrelated result just because it is in AP.
+    # A score of 0.68 allows common spelling differences but rejects weak matches.
+    if best_match and best_score >= 0.68:
+        latitude, longitude, result = best_match
+        coordinates = (latitude, longitude)
+        GEOCODING_CACHE[cache_key] = coordinates
+
+        print(
+            f"Location found: {place_name} -> {coordinates} "
+            f"(match score: {best_score:.2f})"
+        )
+        print("Matched place:", result.get("display_name", ""))
+        return coordinates
+
+    print(
+        f"Location not found with a reliable AP spelling match: {place_name}. "
+        f"Best match score: {best_score:.2f}"
+    )
+    return None
 
 
 # ============================================================
@@ -426,28 +615,59 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * radius_km * math.asin(math.sqrt(a))
 
 
-def ensure_route_reaches_destination(route, destination):
-    """Reject routes whose returned geometry does not reach the destination.
-
-    Do not append a straight/secondary connector to a bad candidate: that can
-    hide a routing error and create misleading geometry on the frontend.
+def ensure_route_matches_endpoints(
+    route,
+    source,
+    destination,
+    source_tolerance_km=0.50,
+    destination_tolerance_km=0.15
+):
+    """Accept a route only when its geometry starts and ends at this journey's
+    requested road-access points. Never join or extend a bad route artificially.
+    GraphHopper geometry coordinates are [longitude, latitude].
     """
     if route is None:
         return None
 
     coordinates = route.get("points", {}).get("coordinates", [])
-    if len(coordinates) < 2:
+    if not isinstance(coordinates, list) or len(coordinates) < 2:
+        print("Rejecting route: missing or incomplete route geometry.")
         return None
 
-    last_lon, last_lat = coordinates[-1]
-    destination_lat, destination_lon = destination
-    gap_km = haversine_km(
+    try:
+        first_lon, first_lat = map(float, coordinates[0][:2])
+        last_lon, last_lat = map(float, coordinates[-1][:2])
+        source_lat, source_lon = map(float, source[:2])
+        destination_lat, destination_lon = map(float, destination[:2])
+    except (TypeError, ValueError, IndexError):
+        print("Rejecting route: invalid endpoint coordinates.")
+        return None
+
+    start_gap_km = haversine_km(
+        first_lat, first_lon, source_lat, source_lon
+    )
+    end_gap_km = haversine_km(
         last_lat, last_lon, destination_lat, destination_lon
     )
 
-    print(f"Route endpoint gap to destination: {gap_km:.3f} km")
-    if gap_km > 1.5:
-        print("Rejecting route: endpoint is too far from the requested destination.")
+    print(
+        "Route endpoint validation: "
+        f"start gap={start_gap_km:.3f} km, "
+        f"destination gap={end_gap_km:.3f} km"
+    )
+
+    if start_gap_km > source_tolerance_km:
+        print(
+            "Rejecting route: it starts at a different location "
+            f"({start_gap_km:.3f} km from requested source)."
+        )
+        return None
+
+    if end_gap_km > destination_tolerance_km:
+        print(
+            "Rejecting route: it ends at a different location "
+            f"({end_gap_km:.3f} km from requested destination)."
+        )
         return None
 
     return route
@@ -1613,29 +1833,70 @@ def generate_routes(
     # SOURCE
     # ========================================================
 
-    source = get_coordinates(
+    source = None
 
-        request.source.strip()
+    if request.source_coordinates is not None:
+        try:
+            if len(request.source_coordinates) != 2:
+                raise ValueError("GPS coordinates must contain latitude and longitude.")
 
-    )
+            gps_latitude = float(request.source_coordinates[0])
+            gps_longitude = float(request.source_coordinates[1])
 
+            if not (
+                math.isfinite(gps_latitude)
+                and math.isfinite(gps_longitude)
+                and -90 <= gps_latitude <= 90
+                and -180 <= gps_longitude <= 180
+            ):
+                raise ValueError("GPS coordinates are outside valid latitude/longitude ranges.")
+
+            source = (gps_latitude, gps_longitude)
+            print(f"Using current GPS source: {source}")
+
+        except (TypeError, ValueError) as error:
+            return {
+                "success": False,
+                "message": f"Invalid current GPS coordinates: {error}"
+            }
+
+    else:
+        source = get_coordinates(request.source.strip())
 
     if source is None:
-
         return {
-
-            "success":
-                False,
-
-            "message":
-                (
-                    "Could not find source location: "
-                    +
-                    request.source
-                )
-
+            "success": False,
+            "message": (
+                "Could not find source location: "
+                + request.source
+            )
         }
 
+    # Snap the source village/place centroid or GPS point to a nearby
+    # routable car road before requesting routes from GraphHopper.
+    original_source = source
+    source = get_nearest_road_point(original_source)
+
+    if source is None:
+        return {
+            "success": False,
+            "message": (
+                "Could not find a nearby car road for the source location. "
+                "Please choose a more specific source or nearby landmark."
+            )
+        }
+
+    source_snap_gap = haversine_km(
+        original_source[0],
+        original_source[1],
+        source[0],
+        source[1]
+    )
+    print(
+        "Source road snap:",
+        source,
+        f"(geocoded point is {source_snap_gap:.3f} km away)"
+    )
 
     # ========================================================
     # DESTINATION
@@ -1664,6 +1925,32 @@ def generate_routes(
 
         }
 
+    # Snap the geocoded destination (which may be a town/place centroid)
+    # to a nearby routable car road. Use this same point for every route
+    # candidate and for the destination marker returned to the frontend.
+    original_destination = destination
+    destination = get_nearest_road_point(original_destination)
+
+    if destination is None:
+        return {
+            "success": False,
+            "message": (
+                "Could not find a nearby car road for the destination. "
+                "Please enter a more specific destination or nearby address."
+            )
+        }
+
+    destination_snap_gap = haversine_km(
+        original_destination[0],
+        original_destination[1],
+        destination[0],
+        destination[1]
+    )
+    print(
+        "Destination road snap:",
+        destination,
+        f"(geocoded point is {destination_snap_gap:.3f} km away)"
+    )
 
     print(
         "\nSource coordinates:",
@@ -1727,8 +2014,9 @@ def generate_routes(
 
 
     # Validate the main route endpoint as well.
-    main_route = ensure_route_reaches_destination(
+    main_route = ensure_route_matches_endpoints(
         main_route,
+        source,
         destination
     )
 
@@ -1804,12 +2092,10 @@ def generate_routes(
 
 
         # Reject candidates that do not finish near the requested destination.
-        candidate_route = ensure_route_reaches_destination(
-
+        candidate_route = ensure_route_matches_endpoints(
             candidate_route,
-
+            source,
             destination
-
         )
 
 
@@ -1883,6 +2169,30 @@ def generate_routes(
 
             )
 
+
+    # Final endpoint gate: only score and return routes that connect
+    # this exact source and destination.
+    validated_routes = []
+    for route in routes:
+        checked = ensure_route_matches_endpoints(
+            route,
+            source,
+            destination
+        )
+        if checked is not None:
+            validated_routes.append(checked)
+
+    routes = validated_routes
+
+    if not routes:
+        return {
+            "success": False,
+            "message": (
+                "No complete routes were found between the selected source "
+                "and destination. Please choose a more precise destination "
+                "or try another journey."
+            )
+        }
 
     # ========================================================
     # ANALYZE EACH ROUTE
